@@ -1,0 +1,10 @@
+{
+ "mrr10": {
+  "ALL": 0.5,
+  "claude": 0.609,
+  "local-llm": 0.853,
+  "public": 0.542,
+  "template": 0.047
+ },
+ "ms_per_query": 425
+}

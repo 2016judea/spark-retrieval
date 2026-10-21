@@ -1,0 +1,23 @@
+{
+ "device": "mps",
+ "machine": "arm64",
+ "n_docs": 1862,
+ "src_files": [
+  "pubmed27n1302.parquet",
+  "pubmed27n1303.parquet",
+  "pubmed27n1304.parquet",
+  "pubmed27n1305.parquet",
+  "pubmed27n1306.parquet"
+ ],
+ "article_tokens_median": 343.0,
+ "article_tokens_p90": 484,
+ "article_docs_per_s_float16_bs32": 340.5,
+ "article_docs_per_s_float16_bs64": 349.2,
+ "article_docs_per_s_float32_bs32": 97.9,
+ "article_docs_per_s_float32_bs64": 97.9,
+ "query_encode_ms_median": 6.4,
+ "rerank_top100_ms_float16": 440,
+ "rerank_top200_ms_float16": 892,
+ "rerank_top100_ms_float32": 1553,
+ "rerank_top200_ms_float32": 3108
+}
