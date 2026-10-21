@@ -35,7 +35,6 @@ corpus only, so it is allowed under the no-egress rule.
 
 ## Reality check (filled in after parsing)
 
-See README "Corpus" for the measured fill rates.
 
 Measured 2026-10-21 over 39,167,524 parsed records: abstract 74.1%, MeSH 82.6%,
 authors 98.5%, year 100%, keywords 31.5%, reference list 30.2% (418,178,302 in-corpus
