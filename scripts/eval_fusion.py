@@ -16,7 +16,7 @@ import duckdb, numpy as np, torch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from spark.bm25 import BM25
-from spark.dense import QueryEncoder, Store, load_ann
+from spark.dense import INDEX, QueryEncoder, Store
 
 RRF_K = 60
 
@@ -37,6 +37,7 @@ if __name__ == "__main__":
     ap.add_argument("--k", type=int, default=1000); ap.add_argument("--rerank", type=int, default=100)
     ap.add_argument("--nprobe", type=int, default=64); ap.add_argument("--tag", default="")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--index", default=str(INDEX))
     a = ap.parse_args()
     dev = [json.loads(l) for l in (ROOT / "dev/devset.jsonl").read_text().splitlines()]
     if a.limit:
@@ -53,9 +54,15 @@ if __name__ == "__main__":
     print(f"dense store: {len(st)} vectors from {len(st.shards)} shards", flush=True)
     t0 = time.time(); Q = QueryEncoder()(([r["query"] for r in dev])); T["qenc_ms"] = (time.time() - t0) / len(dev) * 1000
     t0 = time.time()
-    if a.ann:
-        idx = load_ann(nprobe=a.nprobe)
-        _, I = idx.search(Q.astype(np.float32), a.k)
+    if a.ann:  # faiss in a subprocess: faiss + torch in one process aborts on macOS (libomp)
+        import subprocess
+        qf, of = ROOT / "runs/dev_q.npy", ROOT / "runs/dev_ann.npy"
+        qf.parent.mkdir(exist_ok=True); np.save(qf, Q)
+        r = subprocess.run([sys.executable, str(ROOT / "scripts/ann_search.py"), str(qf), str(of),
+                            "--k", str(a.k), "--nprobe", str(a.nprobe), "--index", a.index], capture_output=True, text=True)
+        print(r.stdout.strip(), r.stderr.strip()[-500:] if r.returncode else "", flush=True)
+        r.check_returncode()
+        I = np.load(of)
     else:  # exact, shard by shard, keep running top-k
         best_s = np.full((len(dev), 0), -np.inf, np.float32); best_i = np.zeros((len(dev), 0), np.int64)
         for s, v in enumerate(st.vecs):
