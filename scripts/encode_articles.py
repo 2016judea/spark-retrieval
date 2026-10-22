@@ -25,7 +25,7 @@ def encode_shard(f, tok, model, dev, bs):
     with torch.no_grad():
         for s in range(0, len(order), bs):
             idx = order[s:s + bs]
-            enc = tok([titles[i] for i in idx], [abstracts[i] for i in idx], truncation="only_second",
+            enc = tok([titles[i] for i in idx], [abstracts[i] for i in idx], truncation="longest_first",
                       padding=True, max_length=512, return_tensors="pt").to(dev)
             out[idx] = model(**enc).last_hidden_state[:, 0, :].float().cpu().numpy().astype(np.float16)
     return pmids, out
