@@ -15,7 +15,7 @@ import duckdb, numpy as np, torch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from spark.bm25 import BM25
+from spark.bm25 import BM25, search_rewritten
 from spark.dense import INDEX, QueryEncoder, Store
 
 RRF_K = 60
@@ -38,23 +38,43 @@ if __name__ == "__main__":
     ap.add_argument("--nprobe", type=int, default=64); ap.add_argument("--tag", default="")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--index", default=str(INDEX))
+    ap.add_argument("--rewrites", nargs="*", default=[], help="runs/rewrites/*.jsonl; BM25 = RRF(original, each rewrite)")
+    ap.add_argument("--no-dense", action="store_true", help="skip the dense side (fused = BM25 list)")
+    ap.add_argument("--official", action="store_true", help="append the 5 official sample questions (dev/official.jsonl)")
     a = ap.parse_args()
     dev = [json.loads(l) for l in (ROOT / "dev/devset.jsonl").read_text().splitlines()]
+    if a.official:
+        dev += [json.loads(l) for l in (ROOT / "dev/official.jsonl").read_text().splitlines()]
+    RW = defaultdict(list); RW_MS = defaultdict(float)
+    for f in a.rewrites:
+        for l in Path(f).read_text().splitlines():
+            d = json.loads(l); RW[d["qid"]] += d["rewrites"]; RW_MS[d["qid"]] += d["ms"]
     if a.limit:
         dev = dev[:: max(1, len(dev) // a.limit)][: a.limit]
     T = {}
 
     # 1. BM25
     t0 = time.time(); b = BM25()
-    bm = [[p for p, _ in b.search(r["query"], a.k)] for r in dev]
+    if a.rewrites:
+        bm = [search_rewritten(b, r["query"], RW[r["qid"]], k=a.k) for r in dev]
+        T["rewrite_gen_ms"] = sum(RW_MS[r["qid"]] for r in dev) / len(dev)
+    else:
+        bm = [[p for p, _ in b.search(r["query"], a.k)] for r in dev]
     T["bm25_ms"] = (time.time() - t0) / len(dev) * 1000
 
     # 2. dense
+    if a.no_dense:
+        class Store:  # empty store: dense side contributes nothing
+            pmids = np.zeros(0, np.int64); shards = []; vecs = []; offsets = np.array([0])
+            def __len__(self): return 0
+            def rows_for(self, p): return np.full(len(p), -1, np.int64)
     st = Store()
     print(f"dense store: {len(st)} vectors from {len(st.shards)} shards", flush=True)
-    t0 = time.time(); Q = QueryEncoder()(([r["query"] for r in dev])); T["qenc_ms"] = (time.time() - t0) / len(dev) * 1000
+    t0 = time.time(); Q = np.zeros((len(dev), 768), np.float32) if a.no_dense else QueryEncoder()(([r["query"] for r in dev])); T["qenc_ms"] = (time.time() - t0) / len(dev) * 1000
     t0 = time.time()
-    if a.ann:  # faiss in a subprocess: faiss + torch in one process aborts on macOS (libomp)
+    if a.no_dense:
+        I = np.full((len(dev), 0), -1, np.int64)
+    elif a.ann:  # faiss in a subprocess: faiss + torch in one process aborts on macOS (libomp)
         import subprocess
         qf, of = ROOT / "runs/dev_q.npy", ROOT / "runs/dev_ann.npy"
         qf.parent.mkdir(exist_ok=True); np.save(qf, Q)
@@ -89,7 +109,7 @@ if __name__ == "__main__":
         dorder = [cand[i] for i in np.argsort(-sc) if np.isfinite(sc[i])]
         dense_ranked.append(dorder)
         rr = defaultdict(float)
-        for lst in (bm[qi], dorder[: a.k]):
+        for lst in ((bm[qi],) if a.no_dense else (bm[qi], dorder[: a.k])):
             for rank, p in enumerate(lst, 1):
                 rr[p] += 1 / (RRF_K + rank)
         fused.append([p for p, _ in sorted(rr.items(), key=lambda x: -x[1])])
@@ -146,7 +166,7 @@ if __name__ == "__main__":
             out.append(rank_of([c[i] for i in np.argsort(-s)], dev[qi]["pmid"]))
         return out
 
-    even = [i for i in range(len(dev)) if i % 2 == 0]
+    even = [i for i in range(len(dev)) if i % 2 == 0 and dev[i]["source"] != "official"]
     grid = [(wy, wc) for wy in (0, 1, 2, 4, 8) for wc in (0, 0.1, 0.25, 0.5, 1.0)]
     wy, wc = max(grid, key=lambda w: mrr10(ranks_prior(*w, even)))
 
@@ -162,20 +182,26 @@ if __name__ == "__main__":
     variants["rrf>ce+meta+prior"] = ranks_prior(wy, wc, range(len(dev)))
     groups = defaultdict(list)
     for i, d in enumerate(dev):
-        groups["ALL"].append(i); groups[d["source"]].append(i)
-    odd = [i for i in range(len(dev)) if i % 2 == 1]
-    names = ["ALL", "public", "local-llm", "template", "claude"]
+        groups[d["source"]].append(i)
+        if d["source"] != "official": groups["ALL"].append(i)
+    odd = [i for i in groups["ALL"] if i % 2 == 1]
+    names = ["ALL", "public", "local-llm", "template", "claude"] + (["official"] if a.official else [])
     lines = [f"{'variant':20s} " + " ".join(f"{g:>9s}" for g in names) + f" {'ALL-odd':>8s}"]
     res = {}
     for v, rk in variants.items():
         row = {g: mrr10([rk[i] for i in groups[g]]) for g in names}
         row["ALL-odd"] = mrr10([rk[i] for i in odd]); res[v] = row
         lines.append(f"{v:20s} " + " ".join(f"{row[g]:9.3f}" for g in names) + f" {row['ALL-odd']:8.3f}")
-    rec = lambda lists, k: sum(1 for i, d in enumerate(dev) if d["pmid"] in lists[i][:k]) / len(dev)
+    rec = lambda lists, k, g="ALL": sum(1 for i in groups[g] if dev[i]["pmid"] in lists[i][:k]) / len(groups[g])
     lines.append(f"recall@{a.rerank} (rerank ceiling): bm25 {rec(bm, a.rerank):.3f}  dense {rec(dense_ranked, a.rerank):.3f}  rrf {rec(fused, a.rerank):.3f}")
+    recall = {g: {"bm25": rec(bm, a.rerank, g), "rrf": rec(fused, a.rerank, g)} for g in names}
+    lines.append(f"recall@{a.rerank} rrf per set: " + " ".join(f"{g} {recall[g]['rrf']:.3f}" for g in names))
+    if a.official:
+        lines.append("official ranks (bm25 / rrf / final): " + "  ".join(
+            f"{dev[i]['qid']} {variants['bm25'][i]}/{variants['rrf'][i]}/{variants['rrf>ce+meta+prior'][i]}" for i in groups["official"]))
     lines.append(f"prior weights fit on even qids: year {wy}, log-cites {wc}")
     lines.append("ms/query: " + ", ".join(f"{k} {v:.0f}" for k, v in T.items()))
     lines.append(f"corpus: {len(st)} dense vectors ({'IVF-PQ nprobe %d' % a.nprobe if a.ann else 'exact, partial'})")
     print("\n".join(lines))
     (ROOT / "runs").mkdir(exist_ok=True)
-    (ROOT / f"runs/fusion{a.tag}.json").write_text(json.dumps({"mrr10": res, "prior": [wy, wc], "ms": T, "n_dense": len(st), "ann": a.ann, "report": lines}, indent=1))
+    (ROOT / f"runs/fusion{a.tag}.json").write_text(json.dumps({"mrr10": res, "recall": recall, "rewrites": a.rewrites, "no_dense": a.no_dense, "prior": [wy, wc], "ms": T, "n_dense": len(st), "ann": a.ann, "report": lines}, indent=1))
